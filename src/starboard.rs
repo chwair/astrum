@@ -10,22 +10,22 @@ pub async fn post(
     starboard_channel: serenity::ChannelId,
     star_count: u64,
     emoji: &str,
-) -> Result<(), Error> {
+) -> Result<u64, Error> {
     let is_voice = message
         .flags
         .is_some_and(|f| f.contains(serenity::MessageFlags::IS_VOICE_MESSAGE));
 
-    // part 1: text header + gray embed in one message
+    // text header + gray embed in one message; capture the message id for future edits
     let header = text_header(message, star_count, emoji);
     let embed = author_embed(message, is_voice);
-    starboard_channel
+    let starboard_msg = starboard_channel
         .send_message(
             &ctx.http,
             serenity::CreateMessage::new().content(header).embed(embed),
         )
         .await?;
 
-    // part 3: image/video attachments re-uploaded after the embed
+    // image/video attachments re-uploaded after the embed
     if !is_voice {
         let mut att_msg = serenity::CreateMessage::new();
         let mut has_media = false;
@@ -55,7 +55,7 @@ pub async fn post(
         }
     }
 
-    // part 4: tenor gif or voice message (sent as a separate message)
+    // tenor gif or voice message (sent as a separate message)
     if is_voice {
         crate::voice::relay(ctx, data, message, starboard_channel).await?;
     } else if let Some(url) = tenor_only_url(&message.content) {
@@ -64,14 +64,19 @@ pub async fn post(
             .await?;
     }
 
-    Ok(())
+    Ok(starboard_msg.id.get())
 }
 
 // builds the first text message: optional reply context followed by the star count line
 fn text_header(message: &serenity::Message, star_count: u64, emoji: &str) -> String {
-    let link = msg_link(message);
-    let mut text = String::new();
+    let mut text = reply_prefix(message);
+    text.push_str(&format!("{emoji} {star_count} ({})", msg_link(message)));
+    text
+}
 
+// returns the -# reply context lines for a message (empty string if not a reply)
+pub fn reply_prefix(message: &serenity::Message) -> String {
+    let mut text = String::new();
     if let Some(ref_msg) = &message.referenced_message {
         let ref_link = msg_link(ref_msg);
         let ref_name = display_name(&ref_msg.author);
@@ -87,8 +92,6 @@ fn text_header(message: &serenity::Message, star_count: u64, emoji: &str) -> Str
             text.push_str(&format!("-# > {line}\n"));
         }
     }
-
-    text.push_str(&format!("{emoji} {star_count} ({link})"));
     text
 }
 
@@ -127,7 +130,7 @@ fn tenor_only_url(content: &str) -> Option<String> {
 }
 
 // builds a discord message link
-fn msg_link(message: &serenity::Message) -> String {
+pub fn msg_link(message: &serenity::Message) -> String {
     format!(
         "https://discord.com/channels/{}/{}/{}",
         message.guild_id.map_or(0, |g| g.get()),

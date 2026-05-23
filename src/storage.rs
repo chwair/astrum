@@ -9,6 +9,8 @@ pub struct GuildConfig {
     #[serde(default = "default_emoji")]
     pub starboard_emoji: String,
     pub starred_messages: HashSet<u64>,
+    #[serde(default)]
+    pub starboard_msg_ids: HashMap<u64, u64>,
 }
 
 fn default_emoji() -> String {
@@ -22,6 +24,7 @@ impl Default for GuildConfig {
             min_stars: 3,
             starboard_emoji: default_emoji(),
             starred_messages: HashSet::new(),
+            starboard_msg_ids: HashMap::new(),
         }
     }
 }
@@ -84,5 +87,17 @@ impl Store {
 
     pub fn mark_starred(&mut self, guild_id: u64, message_id: u64) {
         self.guild_mut(guild_id).starred_messages.insert(message_id);
+    }
+
+    pub fn set_starboard_msg(&mut self, guild_id: u64, message_id: u64, starboard_msg_id: u64) {
+        self.guild_mut(guild_id)
+            .starboard_msg_ids
+            .insert(message_id, starboard_msg_id);
+    }
+
+    pub fn get_starboard_msg(&self, guild_id: u64, message_id: u64) -> Option<u64> {
+        self.guilds
+            .get(&guild_id.to_string())
+            .and_then(|c| c.starboard_msg_ids.get(&message_id).copied())
     }
 }

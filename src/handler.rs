@@ -62,17 +62,76 @@ async fn on_reaction_add(
         return Ok(());
     }
 
-    // double-check under write lock to prevent duplicate posts
+    // under write lock: either schedule a count update (already starred) or mark for first post
     {
         let mut store = data.store.write().await;
         if store.is_starred(guild_id.get(), message.id.get()) {
+            // already on the starboard — schedule a debounced count edit if we have the msg id
+            if let Some(smid) = store.get_starboard_msg(guild_id.get(), message.id.get()) {
+                let prefix = crate::starboard::reply_prefix(&message);
+                let link = crate::starboard::msg_link(&message);
+                schedule_count_update(
+                    ctx.http.clone(),
+                    &data.pending_updates,
+                    message.id.get(),
+                    starboard_channel_id,
+                    smid,
+                    prefix,
+                    star_count,
+                    emoji,
+                    link,
+                );
+            }
             return Ok(());
         }
         store.mark_starred(guild_id.get(), message.id.get());
         store.save().await?;
     }
 
-    crate::starboard::post(ctx, data, &message, starboard_channel_id, star_count, &emoji).await
+    // first post — store the returned starboard message id for future count updates
+    let starboard_msg_id =
+        crate::starboard::post(ctx, data, &message, starboard_channel_id, star_count, &emoji)
+            .await?;
+    {
+        let mut store = data.store.write().await;
+        store.set_starboard_msg(guild_id.get(), message.id.get(), starboard_msg_id);
+        store.save().await?;
+    }
+
+    Ok(())
+}
+
+// schedules a debounced star count edit, cancelling any previous pending edit for this message
+fn schedule_count_update(
+    http: std::sync::Arc<serenity::Http>,
+    pending: &std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, tokio::task::JoinHandle<()>>>>,
+    original_msg_id: u64,
+    starboard_channel: serenity::ChannelId,
+    starboard_msg_id: u64,
+    prefix: String,
+    star_count: u64,
+    emoji: String,
+    msg_link: String,
+) {
+    let mut map = pending.lock().unwrap();
+    if let Some(handle) = map.remove(&original_msg_id) {
+        handle.abort();
+    }
+    let handle = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+        let content = format!("{prefix}{emoji} {star_count} ({msg_link})");
+        if let Err(e) = starboard_channel
+            .edit_message(
+                &http,
+                serenity::MessageId::new(starboard_msg_id),
+                serenity::EditMessage::new().content(content),
+            )
+            .await
+        {
+            tracing::warn!("failed to update star count: {e}");
+        }
+    });
+    map.insert(original_msg_id, handle);
 }
 
 // returns true if the reaction matches the configured emoji string.

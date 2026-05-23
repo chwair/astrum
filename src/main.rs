@@ -16,6 +16,7 @@ pub struct Data {
     pub store: Arc<RwLock<storage::Store>>,
     pub http_client: reqwest::Client,
     pub bot_token: String,
+    pub pending_updates: Arc<std::sync::Mutex<std::collections::HashMap<u64, tokio::task::JoinHandle<()>>>>,
 }
 
 #[tokio::main]
@@ -36,6 +37,7 @@ async fn main() {
         store: Arc::new(RwLock::new(storage::Store::load("data.json").await)),
         http_client: reqwest::Client::new(),
         bot_token: token.clone(),
+        pending_updates: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     let framework = poise::Framework::builder()
