@@ -17,12 +17,15 @@ pub async fn post(
 
     // text header + gray embed in one message; capture the message id for future edits
     let header = text_header(message, star_count, emoji);
-    let embed = author_embed(message, is_voice);
+    let mut msg_builder = serenity::CreateMessage::new()
+        .content(header)
+        .embed(author_embed(message, is_voice));
+    // include any embeds from the original message after the author embed
+    for src in &message.embeds {
+        msg_builder = msg_builder.embed(copy_embed(src));
+    }
     let starboard_msg = starboard_channel
-        .send_message(
-            &ctx.http,
-            serenity::CreateMessage::new().content(header).embed(embed),
-        )
+        .send_message(&ctx.http, msg_builder)
         .await?;
 
     // image/video attachments re-uploaded after the embed
@@ -157,4 +160,46 @@ fn excerpt(text: &str, max: usize) -> Option<String> {
     } else {
         Some(format!("{}…", &text[..max]))
     }
+}
+// converts a received embed into a createembed for re-sending (thx claude)
+fn copy_embed(e: &serenity::Embed) -> serenity::CreateEmbed {
+    let mut ce = serenity::CreateEmbed::new();
+    if let Some(title) = &e.title {
+        ce = ce.title(title);
+    }
+    if let Some(desc) = &e.description {
+        ce = ce.description(desc);
+    }
+    if let Some(url) = &e.url {
+        ce = ce.url(url);
+    }
+    if let Some(color) = e.colour {
+        ce = ce.color(color);
+    }
+    if let Some(ts) = e.timestamp {
+        ce = ce.timestamp(ts);
+    }
+    if let Some(img) = &e.image {
+        ce = ce.image(&img.url);
+    }
+    if let Some(thumb) = &e.thumbnail {
+        ce = ce.thumbnail(&thumb.url);
+    }
+    if let Some(author) = &e.author {
+        let mut ea = serenity::CreateEmbedAuthor::new(&author.name);
+        if let Some(icon) = &author.icon_url {
+            ea = ea.icon_url(icon);
+        }
+        if let Some(url) = &author.url {
+            ea = ea.url(url);
+        }
+        ce = ce.author(ea);
+    }
+    if let Some(footer) = &e.footer {
+        ce = ce.footer(serenity::CreateEmbedFooter::new(&footer.text));
+    }
+    for field in &e.fields {
+        ce = ce.field(&field.name, &field.value, field.inline);
+    }
+    ce
 }
