@@ -129,7 +129,7 @@ fn tenor_only_url(content: &str) -> Option<String> {
 // builds a discord message link
 fn msg_link(message: &serenity::Message) -> String {
     format!(
-        "https://discord.com/channels/{}/{}/{}",+0
+        "https://discord.com/channels/{}/{}/{}",
         message.guild_id.map_or(0, |g| g.get()),
         message.channel_id.get(),
         message.id.get(),
