@@ -30,32 +30,7 @@ pub async fn post(
 
     // image/video attachments re-uploaded after the embed
     if !is_voice {
-        let mut att_msg = serenity::CreateMessage::new();
-        let mut has_media = false;
-        for att in &message.attachments {
-            let is_media = att
-                .content_type
-                .as_deref()
-                .is_some_and(|ct| ct.starts_with("image/") || ct.starts_with("video/"));
-            if is_media {
-                match data.http_client.get(&att.url).send().await {
-                    Ok(resp) => match resp.bytes().await {
-                        Ok(bytes) => {
-                            att_msg = att_msg.add_file(serenity::CreateAttachment::bytes(
-                                bytes.to_vec(),
-                                &att.filename,
-                            ));
-                            has_media = true;
-                        }
-                        Err(e) => tracing::warn!("failed to read attachment {}: {e}", att.filename),
-                    },
-                    Err(e) => tracing::warn!("failed to fetch attachment {}: {e}", att.filename),
-                }
-            }
-        }
-        if has_media {
-            starboard_channel.send_message(&ctx.http, att_msg).await?;
-        }
+        upload_media(ctx, data, &message.attachments, starboard_channel).await?;
     }
 
     // tenor gif or voice message (sent as a separate message)
@@ -67,7 +42,122 @@ pub async fn post(
             .await?;
     }
 
+    // forwarded messages are relayed as a separate message
+    if let Some(snapshot) = message.message_snapshots.first() {
+        post_forward(ctx, data, snapshot, starboard_channel).await?;
+    }
+
+    // stickers on the original message are relayed as a separate message
+    post_stickers(ctx, &message.sticker_items, starboard_channel).await?;
+
     Ok(starboard_msg.id.get())
+}
+
+// downloads image/video attachments, returning them as re-uploadable files
+async fn fetch_media(
+    data: &Data,
+    attachments: &[serenity::Attachment],
+) -> Vec<serenity::CreateAttachment> {
+    let mut files = Vec::new();
+    for att in attachments {
+        let is_media = att
+            .content_type
+            .as_deref()
+            .is_some_and(|ct| ct.starts_with("image/") || ct.starts_with("video/"));
+        if is_media {
+            match data.http_client.get(&att.url).send().await {
+                Ok(resp) => match resp.bytes().await {
+                    Ok(bytes) => {
+                        files.push(serenity::CreateAttachment::bytes(
+                            bytes.to_vec(),
+                            &att.filename,
+                        ));
+                    }
+                    Err(e) => tracing::warn!("failed to read attachment {}: {e}", att.filename),
+                },
+                Err(e) => tracing::warn!("failed to fetch attachment {}: {e}", att.filename),
+            }
+        }
+    }
+    files
+}
+
+// downloads and re-uploads image/video attachments as one message
+async fn upload_media(
+    ctx: &serenity::Context,
+    data: &Data,
+    attachments: &[serenity::Attachment],
+    starboard_channel: serenity::ChannelId,
+) -> Result<(), Error> {
+    let files = fetch_media(data, attachments).await;
+    if !files.is_empty() {
+        let mut att_msg = serenity::CreateMessage::new();
+        for file in files {
+            att_msg = att_msg.add_file(file);
+        }
+        starboard_channel.send_message(&ctx.http, att_msg).await?;
+    }
+    Ok(())
+}
+
+// relays a forwarded message as a separate quoted message with its media attached
+async fn post_forward(
+    ctx: &serenity::Context,
+    data: &Data,
+    snapshot: &serenity::MessageSnapshot,
+    starboard_channel: serenity::ChannelId,
+) -> Result<(), Error> {
+    let mut content = String::from("> -# ↱ *Forwarded*\n");
+    for line in snapshot.content.lines() {
+        content.push_str(&format!("> {line}\n"));
+    }
+
+    let mut msg_builder = serenity::CreateMessage::new().content(content);
+    for src in &snapshot.embeds {
+        msg_builder = msg_builder.embed(copy_embed(src));
+    }
+    for file in fetch_media(data, &snapshot.attachments).await {
+        msg_builder = msg_builder.add_file(file);
+    }
+    starboard_channel.send_message(&ctx.http, msg_builder).await?;
+
+    // stickers carried in the forward are relayed as their own message
+    post_stickers(ctx, &snapshot.sticker_items, starboard_channel).await?;
+
+    Ok(())
+}
+
+// relays message stickers as image embeds in a separate starboard message
+async fn post_stickers(
+    ctx: &serenity::Context,
+    stickers: &[serenity::StickerItem],
+    starboard_channel: serenity::ChannelId,
+) -> Result<(), Error> {
+    if stickers.is_empty() {
+        return Ok(());
+    }
+
+    let mut msg_builder = serenity::CreateMessage::new();
+    for sticker in stickers {
+        let mut embed = serenity::CreateEmbed::new()
+            .author(serenity::CreateEmbedAuthor::new(format!("{}", sticker.name)))
+            .color(serenity::Color::new(0x808080));
+        // gif stickers are served from media.discordapp.net, not the cdn host serenity builds;
+        // png/apng use the cdn url, lottie stickers fall back to the name only
+        let url = match sticker.format_type {
+            serenity::StickerFormatType::Gif => {
+                Some(format!("https://media.discordapp.net/stickers/{}.gif", sticker.id))
+            }
+            _ => sticker.image_url(),
+        };
+        if let Some(url) = url {
+            embed = embed.image(url);
+        }
+        msg_builder = msg_builder.embed(embed);
+    }
+    starboard_channel.send_message(&ctx.http, msg_builder).await?;
+
+    Ok(())
 }
 
 // builds the first text message: optional reply context followed by the star count line
