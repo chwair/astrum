@@ -1,5 +1,7 @@
 use poise::serenity_prelude as serenity;
+use serde_json::Value;
 
+use crate::components as ui;
 use crate::{Context, Error};
 
 /// configure the starboard for this server
@@ -20,9 +22,7 @@ pub async fn channel(
         store.guild_mut(guild_id).starboard_channel = Some(channel.id.get());
         store.save().await?;
     }
-    ctx.say(format!("starboard channel set to <#{}>.", channel.id))
-        .await?;
-    Ok(())
+    ui::reply(ctx, panel(format!("starboard channel set to <#{}>", channel.id))).await
 }
 
 /// set the minimum number of reactions to reach the starboard
@@ -32,8 +32,7 @@ pub async fn stars(
     #[description = "minimum reactions (must be at least 1)"] count: u64,
 ) -> Result<(), Error> {
     if count == 0 {
-        ctx.say("minimum reactions must be at least 1").await?;
-        return Ok(());
+        return ui::reply(ctx, panel("minimum reactions must be at least 1")).await;
     }
     let guild_id = ctx.guild_id().expect("guild_only").get();
     {
@@ -41,42 +40,90 @@ pub async fn stars(
         store.guild_mut(guild_id).min_stars = count;
         store.save().await?;
     }
-    ctx.say(format!("minimum reactions set to {count}")).await?;
-    Ok(())
+    ui::reply(ctx, panel(format!("minimum reactions set to {count}"))).await
 }
 
-/// set the emoji used to star messages
+/// manage the emojis that count toward the starboard
 #[poise::command(slash_command, guild_only, ephemeral, required_permissions = "ADMINISTRATOR")]
-pub async fn emoji(
-    ctx: Context<'_>,
-    #[description = "emoji to use as the star reaction"] emoji: String,
-) -> Result<(), Error> {
+pub async fn emoji(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().expect("guild_only").get();
-    {
-        let mut store = ctx.data().store.write().await;
-        store.guild_mut(guild_id).starboard_emoji = emoji.clone();
-        store.save().await?;
-    }
-    ctx.say(format!("star emoji set to {emoji}")).await?;
-    Ok(())
+    let emojis = {
+        let store = ctx.data().store.read().await;
+        store.guild(guild_id).starboard_emojis
+    };
+
+    ui::reply(ctx, emoji_panel(&emojis)).await
 }
 
 /// show the current starboard configuration
 #[poise::command(slash_command, guild_only, ephemeral)]
 pub async fn show(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().expect("guild_only").get();
-    let store = ctx.data().store.read().await;
-    let cfg = store.guild(guild_id);
+    let cfg = {
+        let store = ctx.data().store.read().await;
+        store.guild(guild_id)
+    };
 
-    let channel_str = cfg
+    let channel = cfg
         .starboard_channel
         .map(|id| format!("<#{id}>"))
         .unwrap_or_else(|| "*not set*".to_string());
 
-    ctx.say(format!(
-        "channel: {channel_str}\nmin reactions: {}\nemoji: {}",
-        cfg.min_stars, cfg.starboard_emoji
-    ))
-    .await?;
-    Ok(())
+    ui::reply(
+        ctx,
+        vec![ui::container(vec![
+            ui::text("**starboard configuration**"),
+            ui::separator(),
+            ui::text(format!(
+                "channel: {channel}\nmin reactions: {}\nemojis: {}",
+                cfg.min_stars,
+                cfg.starboard_emojis.join(" ")
+            )),
+        ])],
+    )
+    .await
+}
+
+// a plain one-line config response
+fn panel(content: impl Into<String>) -> Vec<Value> {
+    vec![ui::container(vec![ui::text(content)])]
+}
+
+// builds the emoji config panel: a remove button per emoji plus an add button
+pub fn emoji_panel(emojis: &[String]) -> Vec<Value> {
+    let header = format!(
+        "**starboard emojis** ({}/{})\n{}\n-# click an emoji to remove it. a message needs enough \
+         distinct people reacting with these to reach the starboard.",
+        emojis.len(),
+        crate::emoji::MAX_EMOJIS,
+        emojis.join(" "),
+    );
+
+    let mut items = vec![ui::text(header), ui::separator()];
+
+    // the last emoji can't be removed, otherwise nothing could star a message
+    let locked = emojis.len() <= 1;
+    for chunk in emojis.chunks(5) {
+        let buttons = chunk
+            .iter()
+            .map(|e| {
+                let id = format!("{}{e}", crate::handler::REMOVE_PREFIX);
+                match crate::emoji::reaction_type(e) {
+                    Some(rt) => ui::button(&id, ui::DANGER, None, Some(&rt), locked),
+                    None => ui::button(&id, ui::DANGER, Some(e), None, locked),
+                }
+            })
+            .collect();
+        items.push(ui::action_row(buttons));
+    }
+
+    items.push(ui::action_row(vec![ui::button(
+        crate::handler::ADD_ID,
+        ui::PRIMARY,
+        Some("add emoji"),
+        None,
+        emojis.len() >= crate::emoji::MAX_EMOJIS,
+    )]));
+
+    vec![ui::container(items)]
 }

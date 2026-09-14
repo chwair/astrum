@@ -1,8 +1,11 @@
+mod api;
+mod avatar;
 mod commands;
+mod components;
+mod emoji;
 mod handler;
 mod starboard;
 mod storage;
-mod voice;
 
 use std::sync::Arc;
 
@@ -12,6 +15,7 @@ use tokio::sync::RwLock;
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
 
+#[derive(Clone)]
 pub struct Data {
     pub store: Arc<RwLock<storage::Store>>,
     pub http_client: reqwest::Client,

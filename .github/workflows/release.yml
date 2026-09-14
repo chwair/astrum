@@ -1,0 +1,61 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: version to build, without a leading v (e.g. 1.0.1)
+        required: true
+        type: string
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux
+          - os: windows-latest
+            label: win
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build
+        run: cargo build --release
+
+      - name: zip (linux)
+        if: matrix.label == 'linux'
+        run: zip -j astrum-${{ inputs.version }}-linux.zip target/release/astrum
+
+      - name: zip (windows)
+        if: matrix.label == 'win'
+        run: Compress-Archive -Path target/release/astrum.exe -DestinationPath astrum-${{ inputs.version }}-win.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: astrum-${{ matrix.label }}
+          path: astrum-${{ inputs.version }}-${{ matrix.label }}.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "v${{ inputs.version }}" dist/*.zip
+          --draft
+          --title "astrum v${{ inputs.version }}"
+          --generate-notes
