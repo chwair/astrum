@@ -17,6 +17,9 @@ const MAX_EMBEDS: usize = 4;
 // one past the starboard server's limit would fail the whole post
 const MAX_UPLOAD: usize = 20 * 1024 * 1024;
 
+// upload name to the url the components point at
+type Media = HashMap<String, String>;
+
 // the inline avatar emojis a post needs, for whoever is shown in it
 #[derive(Default)]
 struct Avatars {
@@ -43,19 +46,7 @@ pub async fn post(
     starboard_channel: serenity::ChannelId,
     summary: &str,
 ) -> Result<u64, Error> {
-    let (main, forwarded) = media_plan(message);
-    let mut files = Vec::new();
-    for plan in [&main, &forwarded] {
-        files.append(&mut fetch_media(data, &plan.gallery).await);
-        files.append(&mut fetch_media(data, &plan.files).await);
-    }
-
-    // everything that made it into the upload can be referenced by the components
-    let media: HashMap<String, String> = files
-        .iter()
-        .map(|file| (file.name.clone(), format!("attachment://{}", file.name)))
-        .collect();
-
+    let (files, media) = collect_media(data, message).await;
     let components = build(message, summary, &media, &avatars(ctx, data, message).await);
     let starboard_msg_id = api::send(
         &data.http_client,
@@ -69,7 +60,7 @@ pub async fn post(
     Ok(starboard_msg_id)
 }
 
-// rewrites an existing starboard post with a fresh star count, keeping its uploaded media
+// rewrites an existing starboard post with a fresh star count
 pub async fn update(
     ctx: &serenity::Context,
     data: &Data,
@@ -78,22 +69,11 @@ pub async fn update(
     starboard_msg_id: u64,
     summary: &str,
 ) -> Result<(), Error> {
-    // a components v2 edit replaces the whole component list, so the media already hosted on
-    // the starboard message has to be pointed at again and kept in the attachment list
-    let existing = starboard_channel
-        .message(&ctx.http, serenity::MessageId::new(starboard_msg_id))
-        .await?;
-    let media: HashMap<String, String> = existing
-        .attachments
-        .iter()
-        .map(|att| (att.filename.clone(), format!("attachment://{}", att.filename)))
-        .collect();
-    let keep: Vec<Value> = existing
-        .attachments
-        .iter()
-        .map(|att| json!({ "id": att.id.get(), "filename": att.filename }))
-        .collect();
-
+    // a components v2 edit replaces the whole component list, and an attachment:// reference
+    // only resolves against the uploads in the same request. pointing at the media already on
+    // the starboard message leaves the reference dangling and discord drops it, so the post is
+    // rebuilt from the original message the same way it was first posted
+    let (files, media) = collect_media(data, message).await;
     let components = build(message, summary, &media, &avatars(ctx, data, message).await);
     api::edit(
         &data.http_client,
@@ -101,9 +81,26 @@ pub async fn update(
         starboard_channel,
         starboard_msg_id,
         &components,
-        &keep,
+        files,
     )
     .await
+}
+
+// downloads everything a post shows, returning the uploads and the urls the components use
+async fn collect_media(data: &Data, message: &serenity::Message) -> (Vec<Upload>, Media) {
+    let (main, forwarded) = media_plan(message);
+    let mut files = Vec::new();
+    for plan in [&main, &forwarded] {
+        files.append(&mut fetch_media(data, &plan.gallery).await);
+        files.append(&mut fetch_media(data, &plan.files).await);
+    }
+
+    // everything that made it into the upload can be referenced by the components
+    let media = files
+        .iter()
+        .map(|file| (file.name.clone(), format!("attachment://{}", file.name)))
+        .collect();
+    (files, media)
 }
 
 // builds the whole post: one container for the message, one more per carried-over embed.
@@ -250,7 +247,7 @@ fn media_plan(message: &serenity::Message) -> (Plan, Plan) {
     let mut plan = |attachments: &[serenity::Attachment]| {
         let mut plan = Plan::default();
         for att in attachments {
-            let name = format!("{index}-{}", att.filename);
+            let name = upload_name(index, &att.filename);
             index += 1;
 
             // re-hosting something past the upload limit would fail the whole post
@@ -276,6 +273,20 @@ fn media_plan(message: &serenity::Message) -> (Plan, Plan) {
         None => Plan::default(),
     };
     (main, forwarded)
+}
+
+// the name an attachment is uploaded under. discord sanitizes the filenames it stores, so an
+// unsafe character here comes back different and an edit can no longer find the upload by name.
+// the extension is left alone, since the file card shows it
+fn upload_name(index: usize, filename: &str) -> String {
+    let safe: String = filename
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' => c,
+            _ => '_',
+        })
+        .collect();
+    format!("{index}-{safe}")
 }
 
 // renders the attachments of one plan: a gallery, then a card per file, then any links
@@ -552,6 +563,22 @@ mod tests {
             items[1]["content"],
             "-# 📎 [cat.png](https://cdn.discordapp.com/attachments/3/6/cat.png)"
         );
+    }
+
+    #[test]
+    fn uploads_under_a_name_discord_hands_back_unchanged() {
+        let mut message = fixture();
+        message.attachments[0].filename = "Screenshot (1) 猫.png".to_string();
+
+        let (main, _) = media_plan(&message);
+        assert_eq!(main.gallery[0].1, "0-Screenshot__1___.png");
+
+        // an edit rebuilds the post from the names discord stored, so those have to be the
+        // same names the plan asks for
+        let stored = main.gallery[0].1.clone();
+        let media = HashMap::from([(stored.clone(), format!("attachment://{stored}"))]);
+        let items = build(&message, "⭐ 3", &media, &Avatars::default())[0]["components"].clone();
+        assert_eq!(items[1]["items"][0]["media"]["url"], format!("attachment://{stored}"));
     }
 
     #[test]

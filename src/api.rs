@@ -21,6 +21,42 @@ pub async fn send(
     components: &[Value],
     files: Vec<Upload>,
 ) -> Result<u64, Error> {
+    let url = format!("{API}/channels/{}/messages", channel.get());
+    let request = client.post(url).header("Authorization", format!("Bot {token}"));
+
+    let body: Value = check(carry(request, components, files).send().await?)
+        .await?
+        .json()
+        .await?;
+    body["id"]
+        .as_str()
+        .and_then(|id| id.parse().ok())
+        .ok_or_else(|| Error::from("discord returned a message without an id"))
+}
+
+// rewrites an existing message, replacing its attachments with the given uploads. an edit
+// declares the whole attachment list, so anything left out of files is dropped from the message
+pub async fn edit(
+    client: &reqwest::Client,
+    token: &str,
+    channel: serenity::ChannelId,
+    message: u64,
+    components: &[Value],
+    files: Vec<Upload>,
+) -> Result<(), Error> {
+    let url = format!("{API}/channels/{}/messages/{message}", channel.get());
+    let request = client.patch(url).header("Authorization", format!("Bot {token}"));
+
+    check(carry(request, components, files).send().await?).await?;
+    Ok(())
+}
+
+// attaches the components and uploads to a request, as multipart when there are files to send
+fn carry(
+    request: reqwest::RequestBuilder,
+    components: &[Value],
+    files: Vec<Upload>,
+) -> reqwest::RequestBuilder {
     let attachments: Vec<Value> = files
         .iter()
         .enumerate()
@@ -32,49 +68,15 @@ pub async fn send(
         "attachments": attachments,
     });
 
-    let url = format!("{API}/channels/{}/messages", channel.get());
-    let request = client.post(url).header("Authorization", format!("Bot {token}"));
-    let request = if files.is_empty() {
-        request.json(&payload)
-    } else {
-        let mut form = reqwest::multipart::Form::new().text("payload_json", payload.to_string());
-        for (i, file) in files.into_iter().enumerate() {
-            let part = reqwest::multipart::Part::bytes(file.bytes).file_name(file.name);
-            form = form.part(format!("files[{i}]"), part);
-        }
-        request.multipart(form)
-    };
-
-    let body: Value = check(request.send().await?).await?.json().await?;
-    body["id"]
-        .as_str()
-        .and_then(|id| id.parse().ok())
-        .ok_or_else(|| Error::from("discord returned a message without an id"))
-}
-
-// rewrites the components of an existing message, keeping the given attachments
-pub async fn edit(
-    client: &reqwest::Client,
-    token: &str,
-    channel: serenity::ChannelId,
-    message: u64,
-    components: &[Value],
-    attachments: &[Value],
-) -> Result<(), Error> {
-    let payload = json!({
-        "flags": IS_COMPONENTS_V2,
-        "components": components,
-        "attachments": attachments,
-    });
-    let url = format!("{API}/channels/{}/messages/{message}", channel.get());
-    let resp = client
-        .patch(url)
-        .header("Authorization", format!("Bot {token}"))
-        .json(&payload)
-        .send()
-        .await?;
-    check(resp).await?;
-    Ok(())
+    if files.is_empty() {
+        return request.json(&payload);
+    }
+    let mut form = reqwest::multipart::Form::new().text("payload_json", payload.to_string());
+    for (i, file) in files.into_iter().enumerate() {
+        let part = reqwest::multipart::Part::bytes(file.bytes).file_name(file.name);
+        form = form.part(format!("files[{i}]"), part);
+    }
+    request.multipart(form)
 }
 
 // turns a failed request into an error carrying discord's explanation
