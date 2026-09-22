@@ -8,6 +8,10 @@ pub struct GuildConfig {
     pub min_stars: u64,
     #[serde(default)]
     pub starboard_emojis: Vec<String>,
+    // what one reaction of an emoji counts for, for the emojis that aren't worth a whole star.
+    // anything missing here is worth the default
+    #[serde(default)]
+    pub emoji_weights: HashMap<String, f64>,
     // single-emoji field from older configs, folded into starboard_emojis on load
     #[serde(default, skip_serializing)]
     starboard_emoji: Option<String>,
@@ -26,6 +30,7 @@ impl Default for GuildConfig {
             starboard_channel: None,
             min_stars: 3,
             starboard_emojis: default_emojis(),
+            emoji_weights: HashMap::new(),
             starboard_emoji: None,
             starred_messages: HashSet::new(),
             starboard_msg_ids: HashMap::new(),
@@ -43,6 +48,32 @@ impl GuildConfig {
             Some(legacy) => vec![crate::emoji::normalize(&legacy).unwrap_or(legacy)],
             None => default_emojis(),
         };
+    }
+
+    // what one reaction of this emoji counts for
+    pub fn weight(&self, emoji: &str) -> f64 {
+        self.emoji_weights
+            .get(emoji)
+            .copied()
+            .unwrap_or(crate::emoji::DEFAULT_WEIGHT)
+    }
+
+    // stores a weight, or forgets it when it's back to the default
+    pub fn set_weight(&mut self, emoji: &str, weight: f64) {
+        match weight == crate::emoji::DEFAULT_WEIGHT {
+            true => {
+                self.emoji_weights.remove(emoji);
+            }
+            false => {
+                self.emoji_weights.insert(emoji.to_string(), weight);
+            }
+        }
+    }
+
+    // drops an emoji and the weight that went with it
+    pub fn remove_emoji(&mut self, emoji: &str) {
+        self.starboard_emojis.retain(|e| e != emoji);
+        self.emoji_weights.remove(emoji);
     }
 }
 

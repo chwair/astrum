@@ -358,14 +358,16 @@ fn sticker_urls(stickers: &[serenity::StickerItem]) -> Vec<String> {
 
 // text helpers
 
-// renders each reacted emoji with its count, plus the unique reactor total when there's more than one
-pub fn star_summary(counts: &[(String, u64)], total: u64) -> String {
+// renders each reacted emoji with its count, plus the weighted total when more than one emoji
+// was used or the reactions aren't worth their face value
+pub fn star_summary(counts: &[(String, u64)], score: f64) -> String {
     let mut parts: Vec<String> = counts
         .iter()
         .map(|(emoji, count)| format!("{emoji} {count}"))
         .collect();
-    if counts.len() > 1 {
-        parts.push(format!("· **{total}**"));
+    let plain: u64 = counts.iter().map(|(_, count)| count).sum();
+    if counts.len() > 1 || (score - plain as f64).abs() > 1e-9 {
+        parts.push(format!("· **{}**", crate::emoji::format_weight(score)));
     }
     parts.join(" ")
 }
@@ -596,6 +598,18 @@ mod tests {
             "-# ↳  <:av5:7> [**Nova**](https://discord.com/channels/4/3/2)  look at this"
         );
         assert_eq!(components[1]["type"], 17);
+    }
+
+    #[test]
+    fn shows_the_weighted_total_when_reactions_arent_worth_face_value() {
+        // one emoji, all of it worth face value: the count speaks for itself
+        assert_eq!(star_summary(&[("⭐".into(), 3)], 3.0), "⭐ 3");
+        // a fire worth a third of a star, so three of them make one
+        assert_eq!(star_summary(&[("🔥".into(), 3)], 1.0), "🔥 3 · **1**");
+        assert_eq!(
+            star_summary(&[("⭐".into(), 1), ("🔥".into(), 3)], 2.0),
+            "⭐ 1 🔥 3 · **2**"
+        );
     }
 
     #[test]

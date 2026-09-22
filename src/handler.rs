@@ -1,9 +1,12 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use poise::serenity_prelude as serenity;
 
 use crate::emoji;
 use crate::{Data, Error};
+
+// slack for comparing a sum of fractional weights against the threshold
+const SCORE_EPSILON: f64 = 1e-9;
 
 pub async fn handle_event(
     ctx: &serenity::Context,
@@ -45,7 +48,7 @@ async fn on_reaction_add(
     };
 
     // load config and bail early if the starboard isn't set up
-    let (starboard_channel_id, min_stars, emojis) = {
+    let (starboard_channel_id, min_stars, emojis, weights) = {
         let store = data.store.read().await;
         let cfg = store.guild(guild_id.get());
         match cfg.starboard_channel {
@@ -53,6 +56,7 @@ async fn on_reaction_add(
                 serenity::ChannelId::new(ch),
                 cfg.min_stars,
                 cfg.starboard_emojis.clone(),
+                cfg.emoji_weights.clone(),
             ),
             None => return Ok(()),
         }
@@ -80,13 +84,14 @@ async fn on_reaction_add(
         replied_to.guild_id = Some(guild_id);
     }
 
-    let (counts, star_count) = tally(ctx, &message, &emojis).await?;
+    let (counts, score) = tally(ctx, &message, &emojis, &weights).await?;
 
-    if star_count < min_stars {
+    // a sum of fractional weights lands just short of a whole number often enough to matter
+    if score + SCORE_EPSILON < min_stars as f64 {
         return Ok(());
     }
 
-    let summary = crate::starboard::star_summary(&counts, star_count);
+    let summary = crate::starboard::star_summary(&counts, score);
 
     // under write lock: either schedule a count update (already starred) or mark for first post
     {
@@ -121,14 +126,16 @@ async fn on_reaction_add(
     Ok(())
 }
 
-// counts the reactors of every configured emoji on a message, returning the per-emoji
-// counts and the number of distinct people behind them (reacting twice only counts once)
+// counts the reactors of every configured emoji on a message, returning the per-emoji counts
+// and what they add up to once each emoji's weight is applied. one person reacting with two
+// different emojis counts for both, since that's what the weights are there to price
 async fn tally(
     ctx: &serenity::Context,
     message: &serenity::Message,
     emojis: &[String],
-) -> Result<(Vec<(String, u64)>, u64), Error> {
-    let mut people: HashSet<serenity::UserId> = HashSet::new();
+    weights: &HashMap<String, f64>,
+) -> Result<(Vec<(String, u64)>, f64), Error> {
+    let mut score = 0.0;
     let mut counts = Vec::new();
 
     for reaction in &message.reactions {
@@ -149,7 +156,6 @@ async fn tally(
                 if user.bot {
                     continue;
                 }
-                people.insert(user.id);
                 count += 1;
             }
             if !full_page {
@@ -158,11 +164,16 @@ async fn tally(
         }
 
         if count > 0 {
+            let weight = weights
+                .get(&configured)
+                .copied()
+                .unwrap_or(emoji::DEFAULT_WEIGHT);
+            score += weight * count as f64;
             counts.push((configured, count));
         }
     }
 
-    Ok((counts, people.len() as u64))
+    Ok((counts, score))
 }
 
 // schedules a debounced star count edit, cancelling any previous pending edit for this message
@@ -202,6 +213,7 @@ pub const ADD_ID: &str = "sb:add";
 pub const REMOVE_PREFIX: &str = "sb:rm:";
 const MODAL_ID: &str = "sb:add:modal";
 const INPUT_ID: &str = "sb:add:input";
+const WEIGHT_ID: &str = "sb:add:weight";
 
 // handles the add/remove buttons on the emoji config panel
 async fn on_component(
@@ -222,8 +234,15 @@ async fn on_component(
             .placeholder("paste an emoji, custom ones included")
             .max_length(100)
             .required(true);
-        let modal = serenity::CreateModal::new(MODAL_ID, "add a starboard emoji")
-            .components(vec![serenity::CreateActionRow::InputText(input)]);
+        let weight =
+            serenity::CreateInputText::new(serenity::InputTextStyle::Short, "weight", WEIGHT_ID)
+                .placeholder("what one reaction counts for, e.g. 2, 0.5 or 1/3. blank for 1")
+                .max_length(16)
+                .required(false);
+        let modal = serenity::CreateModal::new(MODAL_ID, "add a starboard emoji").components(vec![
+            serenity::CreateActionRow::InputText(input),
+            serenity::CreateActionRow::InputText(weight),
+        ]);
         interaction
             .create_response(&ctx.http, serenity::CreateInteractionResponse::Modal(modal))
             .await?;
@@ -235,19 +254,19 @@ async fn on_component(
         None => return Ok(()),
     };
 
-    let emojis = {
+    let cfg = {
         let mut store = data.store.write().await;
         let cfg = store.guild_mut(guild_id.get());
         // at least one emoji has to stay configured
         if cfg.starboard_emojis.len() > 1 {
-            cfg.starboard_emojis.retain(|e| *e != target);
+            cfg.remove_emoji(&target);
         }
-        let emojis = cfg.starboard_emojis.clone();
+        let cfg = cfg.clone();
         store.save().await?;
-        emojis
+        cfg
     };
 
-    let panel = crate::commands::emoji_panel(&emojis);
+    let panel = crate::commands::emoji_panel(&cfg);
     crate::components::update(ctx, interaction.id, &interaction.token, panel).await
 }
 
@@ -265,25 +284,33 @@ async fn on_modal(
         return deny(ctx, &interaction.token, interaction.id).await;
     }
 
-    let submitted = interaction
-        .data
-        .components
-        .iter()
-        .flat_map(|row| &row.components)
-        .find_map(|c| match c {
-            serenity::ActionRowComponent::InputText(input) if input.custom_id == INPUT_ID => {
-                input.value.clone()
-            }
-            _ => None,
-        })
-        .unwrap_or_default();
-
-    let normalized = match emoji::normalize(&submitted) {
+    let normalized = match emoji::normalize(&field(interaction, INPUT_ID)) {
         Some(e) => e,
         None => return ephemeral(ctx, &interaction.token, interaction.id, "that doesn't look like an emoji").await,
     };
 
-    let emojis = {
+    // an empty weight field leaves the emoji worth a plain reaction
+    let submitted_weight = field(interaction, WEIGHT_ID);
+    let weight = match submitted_weight.trim().is_empty() {
+        true => emoji::DEFAULT_WEIGHT,
+        false => match emoji::parse_weight(&submitted_weight) {
+            Some(w) => w,
+            None => {
+                return ephemeral(
+                    ctx,
+                    &interaction.token,
+                    interaction.id,
+                    &format!(
+                        "weight has to be a number above 0 and at most {}, like 2, 0.5 or 1/3",
+                        emoji::format_weight(emoji::MAX_WEIGHT)
+                    ),
+                )
+                .await
+            }
+        },
+    };
+
+    let cfg = {
         let mut store = data.store.write().await;
         let cfg = store.guild_mut(guild_id.get());
         if cfg.starboard_emojis.contains(&normalized) {
@@ -298,14 +325,31 @@ async fn on_modal(
             )
             .await;
         }
-        cfg.starboard_emojis.push(normalized);
-        let emojis = cfg.starboard_emojis.clone();
+        cfg.starboard_emojis.push(normalized.clone());
+        cfg.set_weight(&normalized, weight);
+        let cfg = cfg.clone();
         store.save().await?;
-        emojis
+        cfg
     };
 
-    let panel = crate::commands::emoji_panel(&emojis);
+    let panel = crate::commands::emoji_panel(&cfg);
     crate::components::update(ctx, interaction.id, &interaction.token, panel).await
+}
+
+// the value typed into one of the modal's inputs
+fn field(interaction: &serenity::ModalInteraction, custom_id: &str) -> String {
+    interaction
+        .data
+        .components
+        .iter()
+        .flat_map(|row| &row.components)
+        .find_map(|c| match c {
+            serenity::ActionRowComponent::InputText(input) if input.custom_id == custom_id => {
+                input.value.clone()
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 fn is_admin(member: Option<&serenity::Member>) -> bool {

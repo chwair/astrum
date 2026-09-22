@@ -5,7 +5,7 @@ use crate::components as ui;
 use crate::{Context, Error};
 
 /// configure the starboard for this server
-#[poise::command(slash_command, guild_only, subcommands("channel", "stars", "emoji", "show"))]
+#[poise::command(slash_command, guild_only, subcommands("channel", "stars", "emoji", "weight", "show"))]
 pub async fn config(_ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
@@ -47,12 +47,62 @@ pub async fn stars(
 #[poise::command(slash_command, guild_only, ephemeral, required_permissions = "ADMINISTRATOR")]
 pub async fn emoji(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().expect("guild_only").get();
-    let emojis = {
+    let cfg = {
         let store = ctx.data().store.read().await;
-        store.guild(guild_id).starboard_emojis
+        store.guild(guild_id)
     };
 
-    ui::reply(ctx, emoji_panel(&emojis)).await
+    ui::reply(ctx, emoji_panel(&cfg)).await
+}
+
+/// set what one reaction of an emoji counts for
+#[poise::command(slash_command, guild_only, ephemeral, required_permissions = "ADMINISTRATOR")]
+pub async fn weight(
+    ctx: Context<'_>,
+    #[description = "the configured emoji"] emoji: String,
+    #[description = "what one reaction counts for, e.g. 2, 0.5 or 1/3"] weight: String,
+) -> Result<(), Error> {
+    let guild_id = ctx.guild_id().expect("guild_only").get();
+    let normalized = match crate::emoji::normalize(&emoji) {
+        Some(e) => e,
+        None => return ui::reply(ctx, panel("that doesn't look like an emoji")).await,
+    };
+    let weight = match crate::emoji::parse_weight(&weight) {
+        Some(w) => w,
+        None => {
+            return ui::reply(
+                ctx,
+                panel(format!(
+                    "weight has to be a number above 0 and at most {}, like 2, 0.5 or 1/3",
+                    crate::emoji::format_weight(crate::emoji::MAX_WEIGHT)
+                )),
+            )
+            .await
+        }
+    };
+
+    {
+        let mut store = ctx.data().store.write().await;
+        let cfg = store.guild_mut(guild_id);
+        if !cfg.starboard_emojis.contains(&normalized) {
+            return ui::reply(
+                ctx,
+                panel(format!("{normalized} isn't a starboard emoji. add it with /config emoji")),
+            )
+            .await;
+        }
+        cfg.set_weight(&normalized, weight);
+        store.save().await?;
+    }
+
+    ui::reply(
+        ctx,
+        panel(format!(
+            "{normalized} now counts for {} per reaction",
+            crate::emoji::format_weight(weight)
+        )),
+    )
+    .await
 }
 
 /// show the current starboard configuration
@@ -77,11 +127,23 @@ pub async fn show(ctx: Context<'_>) -> Result<(), Error> {
             ui::text(format!(
                 "channel: {channel}\nmin reactions: {}\nemojis: {}",
                 cfg.min_stars,
-                cfg.starboard_emojis.join(" ")
+                weighted_list(&cfg)
             )),
         ])],
     )
     .await
+}
+
+// the configured emojis, each with its weight when it isn't worth a plain reaction
+fn weighted_list(cfg: &crate::storage::GuildConfig) -> String {
+    cfg.starboard_emojis
+        .iter()
+        .map(|e| match cfg.weight(e) == crate::emoji::DEFAULT_WEIGHT {
+            true => e.clone(),
+            false => format!("{e} ×{}", crate::emoji::format_weight(cfg.weight(e))),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // a plain one-line config response
@@ -90,13 +152,15 @@ fn panel(content: impl Into<String>) -> Vec<Value> {
 }
 
 // builds the emoji config panel: a remove button per emoji plus an add button
-pub fn emoji_panel(emojis: &[String]) -> Vec<Value> {
+pub fn emoji_panel(cfg: &crate::storage::GuildConfig) -> Vec<Value> {
+    let emojis = &cfg.starboard_emojis;
     let header = format!(
-        "**starboard emojis** ({}/{})\n{}\n-# click an emoji to remove it. a message needs enough \
-         distinct people reacting with these to reach the starboard.",
+        "**starboard emojis** ({}/{})\n{}\n-# click an emoji to remove it. a message reaches the \
+         starboard once these reactions add up to the minimum, each counting for its weight. \
+         set one with /config weight.",
         emojis.len(),
         crate::emoji::MAX_EMOJIS,
-        emojis.join(" "),
+        weighted_list(cfg),
     );
 
     let mut items = vec![ui::text(header), ui::separator()];

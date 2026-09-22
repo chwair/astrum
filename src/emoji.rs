@@ -2,6 +2,11 @@ use poise::serenity_prelude as serenity;
 
 pub const MAX_EMOJIS: usize = 10;
 
+// what one reaction is worth when no weight is configured for it
+pub const DEFAULT_WEIGHT: f64 = 1.0;
+// a single reaction can't be worth more than this, so a typo can't star everything
+pub const MAX_WEIGHT: f64 = 100.0;
+
 // parses a custom emoji into (animated, name, id).
 // accepts the canonical "<a:name:id>" form and the legacy "name:id" form.
 fn parse_custom(s: &str) -> Option<(bool, String, u64)> {
@@ -31,6 +36,35 @@ pub fn normalize(input: &str) -> Option<String> {
         return None;
     }
     Some(s.to_string())
+}
+
+// validates a weight typed by a user. accepts a decimal ("0.5") or a fraction ("1/3"),
+// so an emoji can be made to count for less than a whole star
+pub fn parse_weight(input: &str) -> Option<f64> {
+    let s = input.trim();
+    let weight = match s.split_once('/') {
+        Some((num, den)) => {
+            let den: f64 = den.trim().parse().ok()?;
+            let num: f64 = num.trim().parse().ok()?;
+            match den == 0.0 {
+                true => return None,
+                false => num / den,
+            }
+        }
+        None => s.parse().ok()?,
+    };
+    (weight.is_finite() && weight > 0.0 && weight <= MAX_WEIGHT).then_some(weight)
+}
+
+// renders a weight the short way: whole numbers plain, everything else to two decimals
+pub fn format_weight(weight: f64) -> String {
+    if (weight - weight.round()).abs() < 1e-9 {
+        return format!("{}", weight.round());
+    }
+    format!("{weight:.2}")
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
 }
 
 // returns true if the reaction is the configured emoji.
@@ -64,5 +98,30 @@ pub fn reaction_type(configured: &str) -> Option<serenity::ReactionType> {
             Some(serenity::ReactionType::Unicode(configured.to_string()))
         }
         None => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_weights_as_decimals_and_fractions() {
+        assert_eq!(parse_weight("2"), Some(2.0));
+        assert_eq!(parse_weight(" 0.5 "), Some(0.5));
+        assert_eq!(parse_weight("1/3"), Some(1.0 / 3.0));
+        // nothing that would make a reaction free, negative or absurdly heavy
+        assert_eq!(parse_weight("0"), None);
+        assert_eq!(parse_weight("-1"), None);
+        assert_eq!(parse_weight("1/0"), None);
+        assert_eq!(parse_weight("lots"), None);
+        assert_eq!(parse_weight("101"), None);
+    }
+
+    #[test]
+    fn shows_whole_weights_without_a_decimal_point() {
+        assert_eq!(format_weight(2.0), "2");
+        assert_eq!(format_weight(0.5), "0.5");
+        assert_eq!(format_weight(1.0 / 3.0), "0.33");
     }
 }

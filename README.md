@@ -4,6 +4,7 @@ Simple starboard Discord bot written in Rust.
 ## Features
 - Nice looking star messages using Components v2 
 - Up to 10 customizable star emojis, managed from a button panel
+- Per emoji weights, so a reaction can count for more or less than a whole star
 - Author and reply avatars shown inline, cropped into circles
 - Live star counts, edited in place as more people react
 - Nice formatting for replies and forwards
@@ -14,6 +15,7 @@ Simple starboard Discord bot written in Rust.
 `/config channel` - set starboard channel<br>
 `/config stars` - set minimum star count for a message to reach the starboard<br>
 `/config emoji` - add or remove the emojis used for starring<br>
+`/config weight` - set what one reaction of an emoji counts for (`2`, `0.5`, `1/3`)<br>
 
 ## How to run
 0. Install [Rust](https://rust-lang.org/tools/install/) if you haven't already
