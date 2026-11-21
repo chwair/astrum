@@ -135,8 +135,9 @@ fn build(
 
     // anything shown alongside the attachments: stickers, and a lone media link in the content
     let mut extra = sticker_urls(&message.sticker_items);
-    if let Some(url) = lone_media_url(message.content.trim()) {
-        extra.insert(0, url);
+    let lone = lone_media_url(message.content.trim());
+    if let Some(url) = &lone {
+        extra.insert(0, url.clone());
     }
     items.extend(attachments(&main, media, extra));
 
@@ -157,7 +158,11 @@ fn build(
     }
 
     components.push(ui::container(items));
-    for embed in message.embeds.iter().take(MAX_EMBEDS) {
+    let embeds = message
+        .embeds
+        .iter()
+        .filter(|e| lone.is_none() || e.url != lone);
+    for embed in embeds.take(MAX_EMBEDS) {
         if let Some(container) = embed_container(embed) {
             components.push(container);
         }

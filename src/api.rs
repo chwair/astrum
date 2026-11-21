@@ -88,3 +88,33 @@ async fn check(resp: reqwest::Response) -> Result<reqwest::Response, Error> {
     let body = resp.text().await.unwrap_or_default();
     Err(Error::from(format!("discord returned {status}: {body}")))
 }
+
+pub async fn reaction_users(
+    client: &reqwest::Client,
+    token: &str,
+    message: &serenity::Message,
+    emoji: &serenity::ReactionType,
+    burst: bool,
+    after: Option<serenity::UserId>,
+) -> Result<Vec<serenity::User>, Error> {
+    let mut url = reqwest::Url::parse(API)?;
+    url.path_segments_mut()
+        .map_err(|_| Error::from("bad api url"))?
+        .extend([
+            "channels",
+            &message.channel_id.to_string(),
+            "messages",
+            &message.id.to_string(),
+            "reactions",
+            &emoji.as_data(),
+        ]);
+    let mut query = vec![("limit", "100".to_string()), ("type", (burst as u8).to_string())];
+    if let Some(after) = after {
+        query.push(("after", after.to_string()));
+    }
+    let request = client
+        .get(url)
+        .query(&query)
+        .header("Authorization", format!("Bot {token}"));
+    Ok(check(request.send().await?).await?.json().await?)
+}

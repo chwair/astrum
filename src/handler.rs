@@ -84,7 +84,7 @@ async fn on_reaction_add(
         replied_to.guild_id = Some(guild_id);
     }
 
-    let (counts, score) = tally(ctx, &message, &emojis, &weights).await?;
+    let (counts, score) = tally(data, &message, &emojis, &weights).await?;
 
     // a sum of fractional weights lands just short of a whole number often enough to matter
     if score + SCORE_EPSILON < min_stars as f64 {
@@ -130,7 +130,7 @@ async fn on_reaction_add(
 // and what they add up to once each emoji's weight is applied. one person reacting with two
 // different emojis counts for both, since that's what the weights are there to price
 async fn tally(
-    ctx: &serenity::Context,
+    data: &Data,
     message: &serenity::Message,
     emojis: &[String],
     weights: &HashMap<String, f64>,
@@ -145,21 +145,31 @@ async fn tally(
         };
 
         let mut count = 0;
-        let mut after: Option<serenity::UserId> = None;
-        loop {
-            let batch = message
-                .reaction_users(&ctx.http, reaction.reaction_type.clone(), Some(100), after)
-                .await?;
-            after = batch.last().map(|u| u.id);
-            let full_page = batch.len() == 100;
-            for user in batch {
-                if user.bot {
-                    continue;
-                }
-                count += 1;
+        for burst in [false, true] {
+            let total = match burst {
+                false => reaction.count_details.normal,
+                true => reaction.count_details.burst,
+            };
+            if total == 0 {
+                continue;
             }
-            if !full_page {
-                break;
+            let mut after: Option<serenity::UserId> = None;
+            loop {
+                let batch = crate::api::reaction_users(
+                    &data.http_client,
+                    &data.bot_token,
+                    message,
+                    &reaction.reaction_type,
+                    burst,
+                    after,
+                )
+                .await?;
+                after = batch.last().map(|u| u.id);
+                let full_page = batch.len() == 100;
+                count += batch.iter().filter(|user| !user.bot).count() as u64;
+                if !full_page {
+                    break;
+                }
             }
         }
 
